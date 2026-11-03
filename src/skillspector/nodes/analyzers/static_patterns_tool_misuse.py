@@ -51,6 +51,7 @@ from skillspector.python_tokens import python_literal_spans as _python_literal_s
 from skillspector.python_tokens import python_string_body as _python_string_body
 from skillspector.security_reconstruction import validated_json_string_spans
 from skillspector.state import AnalyzerNodeResponse, SkillspectorState
+from skillspector.typescript_tokens import typescript_template_spans as _typescript_template_spans
 
 from . import static_runner
 from .common import (
@@ -2775,7 +2776,7 @@ def _has_shell_command_word_exhaustion(
     structural_quote_closers: set[int] | None = None,
     structural_quote_openers: set[int] | None = None,
     python_source: _PythonSourceOwnership | None = None,
-    javascript_source: _JavaScriptTemplateOwnership | None = None,
+    template_source: _JavaScriptTemplateOwnership | None = None,
     perl_eval_blocks: bool = False,
     quote_limits: dict[int, int] | None = None,
     file_type: str = "shell",
@@ -2824,7 +2825,7 @@ def _has_shell_command_word_exhaustion(
             continue
         if start in owned_word_positions:
             continue
-        if javascript_source is not None and javascript_source.owns(start):
+        if template_source is not None and template_source.owns(start):
             continue
         if structural_quote_closers is not None and start in structural_quote_closers:
             continue
@@ -2942,12 +2943,10 @@ def _has_shell_command_word_exhaustion(
                 # Likewise, a host string or comment token owns its bytes: a
                 # shell quote it opens cannot continue into later host code.
                 unresolved_end = min(unresolved_end, python_source.word_end(start))
-            elif (
-                unresolved_end - start > _SHELL_COMMAND_WORD_CHARS and javascript_source is not None
-            ):
+            elif unresolved_end - start > _SHELL_COMMAND_WORD_CHARS and template_source is not None:
                 # Template literal delimiters and their host-language
                 # expressions cannot continue a shell word into later code.
-                unresolved_end = min(unresolved_end, javascript_source.word_end(start))
+                unresolved_end = min(unresolved_end, template_source.word_end(start))
             if unresolved_end - start > _SHELL_COMMAND_WORD_CHARS:
                 if not _quoted_candidate_is_complete(
                     content, start, quote_limits, check_runtime, quoted_printf_allowed
@@ -4575,6 +4574,16 @@ class _JavaScriptTemplateOwnership:
             if segment_end == len(content):
                 return segment_end
             cursor = segment_end
+
+
+class _TypeScriptTemplateOwnership(_JavaScriptTemplateOwnership):
+    """Lazily proven ownership of template literal bytes in complete TypeScript."""
+
+    def _owned_spans(self) -> JavaScriptTemplateSpans | None:
+        if not self._spans_computed:
+            self._spans = _typescript_template_spans(self._content, self._check_runtime)
+            self._spans_computed = True
+        return self._spans
 
 
 def _skip_command_substitution(
@@ -7253,7 +7262,7 @@ def _has_bounded_parse_exhaustion(
     json_strings: list[tuple[int, int]] = []
     json_operand_spans: list[tuple[int, int]] = []
     python_source = None
-    javascript_source = None
+    template_source = None
     if file_type == "perl" and complete_context:
         content = _perl_literal_print_shell_text(content, check_runtime)
     if file_type == "python" and complete_context:
@@ -7264,7 +7273,11 @@ def _has_bounded_parse_exhaustion(
         # A complete parse proves which backticks own host template bytes.
         # Interpolated templates in files with shell calls retain conservative
         # bounds because this analyzer does not prove their data flow.
-        javascript_source = _JavaScriptTemplateOwnership(content, check_runtime)
+        template_source = _JavaScriptTemplateOwnership(content, check_runtime)
+    if file_type == "typescript" and complete_context:
+        # TypeScript's postfix and type expressions need a separate lexical
+        # proof; unproven source keeps its original conservative shell reading.
+        template_source = _TypeScriptTemplateOwnership(content, check_runtime)
     if file_type in {"json", "markdown"} and complete_context:
         json_strings = validated_json_string_spans(content, check_runtime)
         structural_quote_closers = {end - 1 for _, end in json_strings}
@@ -7327,7 +7340,7 @@ def _has_bounded_parse_exhaustion(
         structural_quote_closers=structural_quote_closers,
         structural_quote_openers=structural_quote_openers,
         python_source=python_source,
-        javascript_source=javascript_source,
+        template_source=template_source,
         perl_eval_blocks=file_type == "perl",
         quote_limits=quote_limits,
         file_type=file_type,
